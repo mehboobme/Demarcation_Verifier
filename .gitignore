@@ -1,0 +1,46 @@
+# Environment variables and secrets
+.env
+.env.local
+.env.*.local
+
+# Python virtual environment
+.venv/
+venv/
+ENV/
+
+# Python cache
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+
+# Distribution / packaging
+dist/
+build/
+*.egg-info/
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# Logs
+*.log
+validation.log
+
+# Debug output
+debug_images/
+
+# Temporary Excel files
+~$*.xlsx
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# Output reports (optional - uncomment if you don't want to track)
+# output/
+
+# Poppler binaries (large files)
+poppler.zip

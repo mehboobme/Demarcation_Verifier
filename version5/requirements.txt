@@ -1,0 +1,14 @@
+pandas
+openpyxl
+pdfplumber
+pdf2image
+pytesseract
+pillow
+opencv-python-headless
+numpy
+reportlab
+pymupdf
+anthropic
+openai
+google-generativeai
+python-dotenv
