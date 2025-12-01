@@ -14,7 +14,8 @@ This system validates ROSHN property PDF documents against ground truth data sto
 
 | File | Description |
 |------|-------------|
-| `main.py` | Main entry point - orchestrates the validation process |
+| `gui.py` | **Professional GUI Application** with ROSHN branding |
+| `main.py` | Command-line entry point - orchestrates the validation process |
 | `config.py` | Configuration with Arabic translations, field mappings, validation rules |
 | `pdf_extractor.py` | Extracts data from PDFs (text, images, red highlights, dimensions) |
 | `excel_loader.py` | Loads ground truth data from Excel |
@@ -35,7 +36,25 @@ sudo apt-get install poppler-utils tesseract-ocr tesseract-ocr-ara
 
 ## Usage
 
-### Simple Usage (Recommended)
+### 🖥️ GUI Application (Recommended)
+
+Launch the professional graphical interface:
+
+```bash
+python gui.py
+```
+
+**Features:**
+- 📁 Browse for PDF files or folders
+- 📊 Select ground truth Excel file
+- 🤖 Toggle AI analysis on/off with cost estimation
+- 📈 Real-time progress monitoring
+- 📋 Validation results summary
+- 💰 AI cost tracking per session
+
+### Command Line Usage
+
+#### Simple Usage (Default Paths)
 ```bash
 python main.py
 ```

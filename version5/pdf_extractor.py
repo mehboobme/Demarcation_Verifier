@@ -1416,16 +1416,22 @@ Return ONLY valid JSON:
     
     def _extract_facade_style(self):
         """Detect facade style using Claude Vision as primary method.
-        
+
         Traditional (T): Has half-circle/arch above door (like attached image shows)
         Modern (M): All doors have flat/rectangular tops, no arches
-        
+
         NOTE: Edge detection was removed because it produced false positives.
         The arch detection algorithm was incorrectly finding circles/ellipses in
         architectural drawings that weren't actual door arches.
         """
         logger.info("Extracting facade style...")
-        
+
+        # Skip AI vision if disabled
+        if self.vision_model is None:
+            logger.info("AI vision disabled - skipping facade detection")
+            self.data.facade_type = "M"  # Default to Modern
+            return
+
         # Known facade types by unit type (from ROSHN specifications)
         # STEP 1: Use Claude Vision (primary, most reliable for this task)
         logger.info("Step 1: Using Claude Vision for facade detection...")
