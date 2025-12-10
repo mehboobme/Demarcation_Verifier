@@ -9,6 +9,7 @@ opencv-python-headless
 numpy
 reportlab
 pymupdf
+poppler-utils
 
 # AI Vision APIs
 anthropic
@@ -20,3 +21,11 @@ python-dotenv
 
 # GUI (tkinter is built-in, no extra packages needed for basic GUI)
 # The GUI uses standard tkinter/ttk which comes with Python
+
+# CLIP-based automatic classifier (optional - for facade/render/view detection)
+torch>=2.0.0
+torchvision>=0.15.0
+ftfy
+regex
+tqdm
+# Note: Install CLIP separately with: pip install git+https://github.com/openai/CLIP.git

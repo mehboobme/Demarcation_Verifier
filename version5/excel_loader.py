@@ -45,6 +45,7 @@ class GroundTruthRecord:
     
     # Location attributes
     corner_unit: str = ""
+    connected_streets: int = 0  # Number of streets connected to plot
     cul_de_sac: str = ""
     green_spine_view: str = ""
     car_parking: int = 0
@@ -178,6 +179,7 @@ class GroundTruthLoader:
         
         # Location attributes
         record.corner_unit = safe_str('Corner_Unit')
+        record.connected_streets = safe_int('Number_Of_Streets')  # Number of adjacent streets
         record.cul_de_sac = safe_str('Cul_De_Sac')
         record.green_spine_view = safe_str('Green_Spine_View')
         record.car_parking = safe_int('Car_Parking')

@@ -159,32 +159,38 @@ DEBUG_CONFIG = {
 }
 
 # Vision Model Configuration
-# Priority order: 1=normal text extraction, 2=Claude Vision, 3=Gemini Vision
+# Using local CLIP model for facade detection (no API costs)
 VISION_MODEL_CONFIG = {
-    "default_model": "claude",  # Options: "claude", "gemini", "auto"
-    "fallback_enabled": True,
+    "default_model": "clip",  # Local CLIP classifier
+    "fallback_enabled": False,
     "models": {
-        "claude": {
-            "name": "Claude Vision (claude-sonnet-4-20250514)",
+        "clip": {
+            "name": "CLIP Classifier (Local)",
             "priority": 1,
             "enabled": True,
         },
-        "gemini": {
-            "name": "Gemini Vision (gemini-2.0-flash)",
-            "priority": 2,
-            "enabled": True,
-        },
+        # Paid APIs disabled - using only local CLIP model
+        # "claude": {
+        #     "name": "Claude Vision (claude-sonnet-4-20250514)",
+        #     "priority": 2,
+        #     "enabled": False,
+        # },
+        # "gemini": {
+        #     "name": "Gemini Vision (gemini-2.0-flash)",
+        #     "priority": 3,
+        #     "enabled": False,
+        # },
     },
-    # Fields that require vision model (normal text extraction unreliable)
+    # Fields that require CLIP model (normal text extraction unreliable)
     "vision_required_fields": [
-        "dimensions",  # Page 3 plot dimensions
-        "facade",      # Page 8 facade style detection
+        "facade",      # Page 8 facade style detection using CLIP
     ],
     # Fields that can use text extraction first
     "text_extraction_fields": [
         "unit_code",           # Page 1
         "page2_data",          # Page 2 (NBHD, Unit Type, Plot No from text)
         "page3_areas",         # Page 3 footer areas table
+        "page3_dimensions",    # Page 3 plot dimensions (PyMuPDF extraction)
         "page4_header",        # Page 4 header
         "page5_header",        # Page 5 header
         "page6_header",        # Page 6 header

@@ -556,13 +556,13 @@ class QueueHandler(logging.Handler):
 class PDFValidationApp:
     """Main PDF Validation Application"""
     
-    # AI Cost per file (approximate USD)
-    AI_COSTS = {
-        "claude": 0.015,      # Claude Vision ~$0.015 per image/page analyzed
-        "gemini": 0.005,      # Gemini Vision ~$0.005 per image
-        "openai": 0.020,      # GPT-4 Vision ~$0.02 per image
-        "auto": 0.015,        # Auto uses Claude primarily
-    }
+    # AI Cost removed - CLIP is free and local
+    # AI_COSTS = {
+    #     "claude": 0.015,
+    #     "gemini": 0.005,
+    #     "openai": 0.020,
+    #     "auto": 0.015,
+    # }
     
     # Pages analyzed with AI per PDF (facade detection mainly)
     AI_PAGES_PER_PDF = 3  # Pages 3, 8, 9 may use Vision
@@ -892,7 +892,7 @@ class PDFValidationApp:
         
         self.ai_check = ttk.Checkbutton(
             toggle_frame,
-            text="Enable AI Vision Analysis (Facade Detection & Dimension Verification)",
+            text="Enable GPU Typology Verifier (ORB + pHash + Blue Boundary)",
             variable=self.use_ai,
             style="Custom.TCheckbutton",
             command=self._update_ai_options
@@ -905,7 +905,7 @@ class PDFValidationApp:
         
         tk.Label(
             ai_info_frame,
-            text="ℹ️  AI Vision is used for facade style detection (Traditional/Modern) and dimension verification when text extraction is insufficient.",
+            text="ℹ️  GPU Typology Verifier performs 6 additional page-by-page unit type checks (ground, first, top, terrace, front facade, back facade) using ORB features + pHash + blue boundary detection. Fully offline, no API costs.",
             font=(ROSHNTheme.FONT_FAMILY, ROSHNTheme.FONT_SIZE_SMALL),
             bg=ROSHNTheme.INFO_LIGHT,
             fg=ROSHNTheme.INFO,
@@ -913,56 +913,38 @@ class PDFValidationApp:
             justify="left"
         ).pack(padx=10, pady=8)
         
-        # AI Model Selection (initially hidden, shown via _update_ai_options)
+        # GPU Verifier Info (initially hidden, shown via _update_ai_options)
         self.model_frame = tk.LabelFrame(
             content,
-            text="AI Model",
+            text="Typology Verification Details",
             font=(ROSHNTheme.FONT_FAMILY, ROSHNTheme.FONT_SIZE_NORMAL),
             bg=ROSHNTheme.BG_CARD,
             fg=ROSHNTheme.TEXT_PRIMARY
         )
         # Don't pack initially - let _update_ai_options handle it
 
-        models = [
-            ("Auto (Recommended)", "auto", "$0.015/file"),
-            ("Claude Vision", "claude", "$0.015/file"),
-            ("Gemini Vision", "gemini", "$0.005/file"),
-            ("OpenAI GPT-4 Vision", "openai", "$0.020/file")
-        ]
+        # GPU Verifier Display
+        frame = tk.Frame(self.model_frame, bg=ROSHNTheme.BG_CARD)
+        frame.pack(anchor="w", padx=10, pady=5)
 
-        for model_name, model_value, cost in models:
-            frame = tk.Frame(self.model_frame, bg=ROSHNTheme.BG_CARD)
-            frame.pack(anchor="w", padx=10, pady=2)
+        tk.Label(
+            frame,
+            text="✓ GPU Verifier (ORB + pHash)",
+            font=(ROSHNTheme.FONT_FAMILY, ROSHNTheme.FONT_SIZE_NORMAL),
+            bg=ROSHNTheme.BG_CARD,
+            fg=ROSHNTheme.SUCCESS
+        ).pack(side="left")
 
-            ttk.Radiobutton(
-                frame,
-                text=model_name,
-                variable=self.ai_model,
-                value=model_value,
-                style="Custom.TRadiobutton",
-                command=self._update_cost_estimate
-            ).pack(side="left")
+        tk.Label(
+            frame,
+            text="6 Additional Checks • Free • Offline",
+            font=(ROSHNTheme.FONT_FAMILY, ROSHNTheme.FONT_SIZE_SMALL),
+            bg=ROSHNTheme.BG_CARD,
+            fg=ROSHNTheme.TEXT_MUTED
+        ).pack(side="left", padx=(10, 0))
 
-            tk.Label(
-                frame,
-                text=cost,
-                font=(ROSHNTheme.FONT_FAMILY, ROSHNTheme.FONT_SIZE_SMALL),
-                bg=ROSHNTheme.BG_CARD,
-                fg=ROSHNTheme.TEXT_MUTED
-            ).pack(side="left", padx=(10, 0))
-
-        # Cost Estimate (initially hidden, shown via _update_ai_options)
-        self.cost_frame = tk.Frame(content, bg=ROSHNTheme.WARNING_LIGHT)
-        # Don't pack initially - let _update_ai_options handle it
-
-        self.cost_label = tk.Label(
-            self.cost_frame,
-            text="💰 Estimated AI Cost: $0.00 (0 files)",
-            font=(ROSHNTheme.FONT_FAMILY, ROSHNTheme.FONT_SIZE_NORMAL, "bold"),
-            bg=ROSHNTheme.WARNING_LIGHT,
-            fg="#856404"
-        )
-        self.cost_label.pack(padx=10, pady=8)
+        # Remove cost estimate frame (no longer needed)
+        # self.cost_frame and self.cost_label are not created
 
         # Initialize visibility based on checkbox state
         self._update_ai_options()
@@ -1226,36 +1208,13 @@ class PDFValidationApp:
         """Update AI options visibility based on toggle"""
         if self.use_ai.get():
             self.model_frame.pack(fill="x", pady=5)
-            self.cost_frame.pack(fill="x", pady=10)
         else:
             self.model_frame.pack_forget()
-            self.cost_frame.pack_forget()
-        self._update_cost_estimate()
     
-    def _update_cost_estimate(self):
-        """Update cost estimate based on file count and AI settings"""
-        if not self.use_ai.get():
-            self.cost_label.configure(text="💰 AI Disabled - No Cost")
-            return
-        
-        # Count PDF files
-        pdf_path = self.pdf_path.get()
-        file_count = 0
-        
-        if pdf_path:
-            if os.path.isfile(pdf_path) and pdf_path.lower().endswith('.pdf'):
-                file_count = 1
-            elif os.path.isdir(pdf_path):
-                file_count = len(list(Path(pdf_path).glob("*.pdf")))
-        
-        # Calculate cost
-        model = self.ai_model.get()
-        cost_per_file = self.AI_COSTS.get(model, 0.015)
-        total_cost = file_count * cost_per_file
-        
-        self.cost_label.configure(
-            text=f"💰 Estimated AI Cost: ${total_cost:.2f} ({file_count} files × ${cost_per_file:.3f})"
-        )
+    # Removed - CLIP is free and local (no API costs)
+    # def _update_cost_estimate(self):
+    #     """Update cost estimate based on file count and AI settings"""
+    #     pass
     
     # ========================================================================
     # VALIDATION
@@ -1319,14 +1278,17 @@ class PDFValidationApp:
             from validator import Validator, ValidationReport
             from report_generator import ReportGenerator
             
-            # Configure PDF extractor logging
-            pdf_logger = logging.getLogger('pdf_extractor')
-            pdf_logger.addHandler(queue_handler)
-            pdf_logger.setLevel(logging.INFO)
+            # Configure logging for ALL relevant modules
+            for logger_name in ['pdf_extractor', 'validator', 'unit_type_verifier_gpu', 'unit_type_verifier_phash']:
+                module_logger = logging.getLogger(logger_name)
+                module_logger.addHandler(queue_handler)
+                module_logger.setLevel(logging.INFO)
             
             self._log_message("=" * 60, "INFO")
             self._log_message("ROSHN DEMARCATION PLAN VALIDATION SYSTEM", "SUCCESS")
             self._log_message("=" * 60, "INFO")
+            self._log_message(f"Python: {sys.executable}", "INFO")
+            self._log_message(f"Working Directory: {os.getcwd()}", "INFO")
             
             # Load ground truth
             self._log_message(f"Loading ground truth from: {excel_path}", "INFO")
@@ -1345,7 +1307,10 @@ class PDFValidationApp:
             self.root.after(0, lambda: self.file_count_label.configure(text=f"0 / {total_files} files"))
             
             # Initialize validator and results
-            validator = Validator()
+            # Use GPU verifier if checkbox is enabled
+            use_gpu = self.use_ai.get()
+            self._log_message(f"GPU Typology Verifier: {'ENABLED (45 checks)' if use_gpu else 'DISABLED (39 checks)'}", "INFO")
+            validator = Validator(use_gpu=use_gpu)
             results = []
             ai_model = self.ai_model.get() if self.use_ai.get() else None
             
@@ -1363,11 +1328,10 @@ class PDFValidationApp:
                 try:
                     # Extract data from PDF
                     debug_dir = os.path.join("./debug_images", Path(pdf_file).stem)
-                    extractor = PDFExtractor(pdf_file, debug_dir, vision_model=ai_model or "auto")
                     
-                    # Disable AI if requested
-                    if not self.use_ai.get():
-                        extractor.vision_model = None
+                    # Don't load CLIP classifier - let PDFExtractor use DINO+SVM fallback
+                    # The GPU verifier is independent and enabled via validator's use_gpu flag
+                    extractor = PDFExtractor(pdf_file, debug_dir, auto_classifier=None)
                     
                     pdf_data = extractor.extract_all()
                     
@@ -1391,10 +1355,7 @@ class PDFValidationApp:
                         self._log_message(f"Result: {status} - {report.matches}/{report.total_checks} matches", 
                                          "SUCCESS" if "PASSED" in report.overall_status else "ERROR")
                         
-                        # Update AI cost
-                        if self.use_ai.get():
-                            cost = self.AI_COSTS.get(ai_model or "auto", 0.015)
-                            self.total_cost += cost
+                        # CLIP classifier is free - no cost tracking needed
                     else:
                         self._log_message(f"No ground truth found for plot {pdf_data.plot_number}", "WARNING")
                 

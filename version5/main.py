@@ -54,11 +54,12 @@ logger = logging.getLogger(__name__)
 class PDFValidationSystem:
     """Main validation system orchestrator"""
     
-    def __init__(self, excel_path: str, output_dir: str = None, debug: bool = True):
+    def __init__(self, excel_path: str, output_dir: str = None, debug: bool = True, use_gpu: bool = False):
         self.excel_path = excel_path
         self.output_dir = output_dir or "./output"
         self.debug_dir = "./debug_images"
         self.debug = debug
+        self.use_gpu = use_gpu
         
         # Create directories
         os.makedirs(self.output_dir, exist_ok=True)
@@ -71,7 +72,7 @@ class PDFValidationSystem:
         logger.info(f"Loaded {len(self.ground_truth)} ground truth records")
         
         # Initialize components
-        self.validator = Validator()
+        self.validator = Validator(use_gpu=self.use_gpu)
         self.report_generator = ReportGenerator(self.output_dir)
         
         # Store results
@@ -245,6 +246,7 @@ def main():
     
     parser.add_argument("--excel", type=str, default=DEFAULT_EXCEL_PATH, help="Path to ground truth Excel file")
     parser.add_argument("--output", type=str, default=DEFAULT_OUTPUT_DIR, help="Output directory for reports")
+    parser.add_argument("--gpu", action="store_true", help="Use GPU-accelerated verifier with blue boundary cropping")
     parser.add_argument("--debug", action="store_true", help="Enable debug mode")
     parser.add_argument("--verbose", action="store_true", help="Enable verbose logging")
     
@@ -258,7 +260,8 @@ def main():
     system = PDFValidationSystem(
         excel_path=args.excel,
         output_dir=args.output,
-        debug=args.debug
+        debug=args.debug,
+        use_gpu=args.gpu
     )
     
     # Run validation

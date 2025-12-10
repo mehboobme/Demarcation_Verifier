@@ -1,0 +1,11 @@
+<View>
+  <Image name="image" value="$image"/>
+  <RectangleLabels name="label" toName="image">
+    <Label value="plot" background="#FF0000"/>
+    <Label value="plot_number" background="#00FF00"/>
+    <Label value="unit_type" background="#0000FF"/>
+    <Label value="street" background="#FFFF00"/>
+    <Label value="park" background="#00FFFF"/>
+    <Label value="adjacent_plot" background="#FF00FF"/>
+  </RectangleLabels>
+</View>

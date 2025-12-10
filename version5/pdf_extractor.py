@@ -23,6 +23,40 @@ import google.generativeai as genai
 from io import BytesIO
 from dotenv import load_dotenv
 
+# Configure Tesseract OCR path
+try:
+    import pytesseract
+    pytesseract.pytesseract.tesseract_cmd = r'C:\Program Files\Tesseract-OCR\tesseract.exe'
+except ImportError:
+    pass
+
+# Configure PaddleOCR (better for document layout analysis)
+try:
+    from paddleocr import PaddleOCR
+    # Initialize PaddleOCR (lazy init on first use)
+    paddle_ocr = None
+    PADDLE_OCR_AVAILABLE = True
+except Exception as e:
+    PADDLE_OCR_AVAILABLE = False
+    paddle_ocr = None
+
+# Try to import automatic classifiers (optional)
+try:
+    from villa_classifier import VillaClassifier
+    CLASSIFIER_AVAILABLE = True
+except ImportError:
+    CLASSIFIER_AVAILABLE = False
+    logger.info("Villa classifier not available (optional)")
+
+# Try to import DINO + SVM classifier (preferred)
+try:
+    from embedding_classifier import EmbeddingClassifier
+    import os.path
+    DINO_MODEL_PATH = "dino_svm_facade_classifier.pkl"
+    DINO_CLASSIFIER_AVAILABLE = os.path.exists(DINO_MODEL_PATH)
+except ImportError:
+    DINO_CLASSIFIER_AVAILABLE = False
+
 # Load environment variables from .env file
 load_dotenv()
 
@@ -76,7 +110,8 @@ class ExtractedData:
     street_width: int = 0
     
     # Location attributes
-    corner_unit: str = ""
+    corner_unit: str = ""  # "yes" or "no" - is plot at corner of streets
+    connected_streets: int = 0  # Number of streets connected to plot (1-4)
     car_parking: int = 0
     orientation: str = ""
     front: str = ""
@@ -99,6 +134,7 @@ class ExtractedData:
     
     # Page 2 Section 1: NBHD_Name, AMANA_Plot_No
     page2_sec1_nbhd_name: str = ""
+    page2_sec1_unit_type: str = ""  # From "الخريطة المرجعية" section 1
     page2_sec1_amana_plot_no: int = 0
     
     # Page 2 Section 2: NBHD_Name, Unit_Type, AMANA_Plot_No (from RED highlighted plot)
@@ -107,6 +143,8 @@ class ExtractedData:
     page2_sec2_amana_plot_no: int = 0
     
     # Page 3: Dimensions (plot width, plot length)
+    page3_header_unit_type: str = ""  # From "الموقع العام" header
+    page3_street_width: int = 0  # From "عرض الشارع"
     page3_land_width: float = 0.0
     page3_land_length: float = 0.0
     
@@ -132,6 +170,21 @@ class ExtractedData:
     
     # Page 7 Header: Unit_Type (Roof/السطح)
     page7_header_unit_type: str = ""
+    
+    # ============ IMAGE DATA FOR UNIT TYPE VERIFICATION ============
+    # Floor plans
+    ground_floor_image: np.ndarray = None  # Page 4 - Ground floor plan
+    first_floor_image: np.ndarray = None   # Page 5 - First floor plan
+    top_floor_image: np.ndarray = None     # Page 6 - Top floor plan
+    terrace_image: np.ndarray = None       # Page 7 - Terrace/roof plan
+    
+    # Facades
+    facade_front_image: np.ndarray = None  # Page 8 - Front facade
+    facade_back_image: np.ndarray = None   # Page 9 - Back/side facade
+    
+    # Legacy fields (kept for compatibility)
+    facade_image: np.ndarray = None        # Page 8 (alias for facade_front_image)
+    floor_plan_image: np.ndarray = None    # Page 4 (alias for ground_floor_image)
     
     # Page 8 Header Section 1: Unit_Type (Front Facade - الواجهة الأمامية)
     page8_sec1_unit_type: str = ""
@@ -168,22 +221,44 @@ class PDFExtractor:
         'DB3': (25.00, 11.54, 15),
     }
     
-    def __init__(self, pdf_path: str, debug_dir: str = None, vision_model: str = "auto"):
+    def __init__(self, pdf_path: str, debug_dir: str = None, vision_model: str = "auto",
+                 auto_classifier: 'VillaClassifier' = None):
         """
         Initialize PDF Extractor
-        
+
         Args:
             pdf_path: Path to PDF file
             debug_dir: Directory for debug output
-            vision_model: Vision model preference - "auto", "claude", "gemini"
+            vision_model: Vision model preference - "auto", "claude", "gemini", None
                 - "auto": Try text extraction first, then Claude, then Gemini
                 - "claude": Use Claude Vision when vision is needed
                 - "gemini": Use Gemini Vision when vision is needed
+                - None: Disable AI vision (use text extraction only or auto classifier)
+            auto_classifier: Optional VillaClassifier for automatic facade/render detection
+                If provided, will be used instead of AI vision for facade detection
         """
         self.pdf_path = pdf_path
         self.debug_dir = debug_dir or "./debug_images"
         self.vision_model = vision_model  # User's preferred vision model
+        self.auto_classifier = auto_classifier  # Automatic CLIP-based classifier
         self.gemini_quota_available = True  # Track Gemini quota status
+        
+        # Initialize DINO + SVM classifier (preferred method)
+        self.dino_classifier = None
+        if DINO_CLASSIFIER_AVAILABLE:
+            try:
+                logger.info("Loading DINO + SVM classifier...")
+                self.dino_classifier = EmbeddingClassifier(
+                    embedding_model='dino', 
+                    classifier_type='svm',
+                    use_fp16=True,      # 1.43x faster with FP16
+                    batch_size=8        # Batch processing for speed
+                )
+                self.dino_classifier.load(DINO_MODEL_PATH)
+                logger.info("✓ DINO + SVM classifier loaded successfully")
+            except Exception as e:
+                logger.warning(f"Failed to load DINO classifier: {e}")
+                self.dino_classifier = None
         
         # Initialize API clients
         self.claude_client = anthropic.Anthropic(api_key=CLAUDE_API_KEY)
@@ -275,6 +350,7 @@ class PDFExtractor:
         self._extract_page7_roof()
         self._extract_page8_facades()
         self._extract_page9_side_facade()
+        self._extract_corner_unit_and_streets()  # NEW: Extract corner unit and connected streets
         self._extract_facade_style()
         self._detect_red_highlights()
         self._post_process()
@@ -297,6 +373,21 @@ class PDFExtractor:
             self.images = convert_from_path(self.pdf_path, dpi=dpi)
             
         self.cv_images = [cv2.cvtColor(np.array(img), cv2.COLOR_RGB2BGR) for img in self.images]
+        
+        # Store all floor plan and facade images for unit type verification
+        # Floor plans: pages 4, 5, 6, 7 (ground, first, top, terrace)
+        self.data.ground_floor_image = self.cv_images[3] if len(self.cv_images) > 3 else None
+        self.data.first_floor_image = self.cv_images[4] if len(self.cv_images) > 4 else None
+        self.data.top_floor_image = self.cv_images[5] if len(self.cv_images) > 5 else None
+        self.data.terrace_image = self.cv_images[6] if len(self.cv_images) > 6 else None
+        
+        # Facades: pages 8, 9 (front, back)
+        self.data.facade_front_image = self.cv_images[7] if len(self.cv_images) > 7 else None
+        self.data.facade_back_image = self.cv_images[8] if len(self.cv_images) > 8 else None
+        
+        # Legacy compatibility (keep old field names pointing to most important pages)
+        self.data.facade_image = self.data.facade_front_image  # Page 8
+        self.data.floor_plan_image = self.data.ground_floor_image  # Page 4
         
         for i, img in enumerate(self.images):
             img.save(os.path.join(self.debug_subdir, f"page_{i+1}.png"))
@@ -362,16 +453,34 @@ class PDFExtractor:
             self.data.nbhd_name = nbhd_short
             logger.info(f"NBHD Name from Page 2: {nbhd_short}")
         
-        # ============ PAGE 2 SECTION 2: Unit_Type from text (الخريطة المرجعية) ============
-        # Unit type appears next to الخريطة المرجعية in the text
+        # ============ PAGE 2 SECTION 1: Unit_Type from text (الخريطة المرجعية) ============
+        # Unit type appears next to الخريطة المرجعية in the text (section 1)
         if ref_maps:
+            self.data.page2_sec1_unit_type = ref_maps[0]
             self.data.page2_sec2_unit_type = ref_maps[0]
             logger.info(f"Unit Type from Page 2 text (الخريطة المرجعية): {ref_maps[0]}")
         
         # ============ PAGE 2 SECTION 2: AMANA_Plot_No from text (القطعة رقم) ============
-        # Plot number appears in format "453 رقم القطعة" or similar
-        plot_pattern = r'(\d{3})\s*(?:ﻢﻗﺭ|رقم)?\s*(?:ﺔﻌﻄﻘﻟﺍ|القطعة)?'
+        # Plot number appears in format "453 رقم القطعة" or "79 رقم القطعة"
+        # Try 2-3 digit numbers first (with context)
+        plot_pattern = r'(\d{2,3})\s*(?:ﻢﻗﺭ|رقم)\s*(?:ﺔﻌﻄﻘﻟﺍ|القطعة)'
         plot_match = re.search(plot_pattern, text)
+        
+        if not plot_match:
+            # Fallback: Try simpler pattern - just 2-3 digit number near القطعة
+            plot_pattern_simple = r'(?:ﺔﻌﻄﻘﻟﺍ|القطعة)\s*(?:ﻢﻗﺭ|رقم)?\s*(\d{2,3})'
+            plot_match = re.search(plot_pattern_simple, text)
+        
+        if not plot_match:
+            # Final fallback: Extract from filename if page 2 extraction fails
+            # This handles cases where OCR quality is poor on page 2
+            filename_plot_pattern = r'-(\d{2,3})\.pdf'
+            filename_match = re.search(filename_plot_pattern, self.pdf_path)
+            if filename_match:
+                plot_from_text = int(filename_match.group(1))
+                self.data.page2_sec2_amana_plot_no = plot_from_text
+                logger.info(f"Plot Number from filename (fallback): {plot_from_text}")
+        
         if plot_match:
             plot_from_text = int(plot_match.group(1))
             self.data.page2_sec2_amana_plot_no = plot_from_text
@@ -388,12 +497,22 @@ class PDFExtractor:
         """Extract site plan data from page 3"""
         text = self.data.raw_text_by_page.get(3, "")
         
-        # Unit type
+        # ============ PAGE 3 HEADER: Unit type from "الموقع العام" ============
         type_pattern = r'\b(DA\d|DB\d|V\d[A-Z]|C\d+|VS\d|VT\d)\b'
         types = re.findall(type_pattern, text)
         if types:
             self.data.unit_type = types[0]
-            logger.info(f"Unit type: {self.data.unit_type}")
+            self.data.page3_header_unit_type = types[0]
+            logger.info(f"Unit type from Page 3 header: {self.data.unit_type}")
+        
+        # ============ PAGE 3: Street width from "عرض الشارع" ============
+        # Look for pattern like "15 m" or "15" after street width text
+        street_width_pattern = r'(?:عرض|عرض\s+الشارع|الشارع).*?(\d+)(?:\s*m)?'
+        street_match = re.search(street_width_pattern, text)
+        if street_match:
+            self.data.page3_street_width = int(street_match.group(1))
+            self.data.street_width = int(street_match.group(1))
+            logger.info(f"Street width from Page 3: {self.data.street_width}m")
         
         # Areas from table (page 3 footer - جدول المساحات)
         all_areas = re.findall(r'(\d+\.?\d*)\s*m2', text)
@@ -506,8 +625,10 @@ class PDFExtractor:
                 if 'street_width' in dimensions and dimensions['street_width']:
                     street_w = int(dimensions['street_width'])
                     self.data.street_width = street_w
+                    self.data.page3_street_width = street_w
                 else:
                     self.data.street_width = 15  # Default only if Vision fails to extract
+                    self.data.page3_street_width = 15
                 logger.info(f"Street width: {self.data.street_width}")
             
             # Call fallback for any missing values (if Vision didn't extract properly)
@@ -679,6 +800,7 @@ class PDFExtractor:
             
             if street_width:
                 self.data.street_width = street_width
+                self.data.page3_street_width = street_width  # NEW: Set page3 specific field
             
             logger.info(f"PyMuPDF extraction successful: width={extracted_width}, length={extracted_length}, street={self.data.street_width}")
             return True
@@ -1414,64 +1536,454 @@ Return ONLY valid JSON:
             self.data.page9_header_unit_type = type_match.group(1)
             logger.debug(f"Page 9 header unit type: {self.data.page9_header_unit_type}")
     
+    def _extract_corner_unit_and_streets(self):
+        """Extract corner unit status and number of connected streets using heuristic.
+        
+        Uses unit type pattern-based heuristic:
+        - Unit types starting with 'C' (e.g., C20, C15) are corner units
+        - Corner units have 2 connected streets
+        - Regular units have 1 connected street
+        
+        This is a simple, reliable heuristic based on ROSHN's naming convention
+        where 'C' prefix indicates corner plots.
+        """
+        logger.info("Extracting corner unit and connected streets info using heuristic...")
+        self._extract_corner_heuristic()
+    
+    def _extract_corner_heuristic(self):
+        """
+        Analyze page 3 site plan to detect corner plots and connected streets.
+        
+        Corner criteria: Plot is at the END of a street (street terminates at the plot)
+        Street vs Corridor: If "ممر" (corridor) is written in the pattern, it's NOT a street
+        """
+        logger.info("Extracting corner unit and connected streets info...")
+        
+        # Default values
+        self.data.corner_unit = "No"
+        self.data.connected_streets = 1
+        
+        if len(self.images) < 3:
+            logger.warning("Page 3 not available")
+            return
+        
+        try:
+            # Get page 3 (site plan)
+            page3_img = np.array(self.images[2])
+            height, width = page3_img.shape[:2]
+            
+            # Detect red highlighted plot
+            hsv = cv2.cvtColor(page3_img, cv2.COLOR_RGB2HSV)
+            lower_red1 = np.array([0, 100, 100])
+            upper_red1 = np.array([10, 255, 255])
+            lower_red2 = np.array([160, 100, 100])
+            upper_red2 = np.array([180, 255, 255])
+            
+            mask1 = cv2.inRange(hsv, lower_red1, upper_red1)
+            mask2 = cv2.inRange(hsv, lower_red2, upper_red2)
+            red_mask = cv2.bitwise_or(mask1, mask2)
+            
+            contours, _ = cv2.findContours(red_mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+            
+            if not contours:
+                logger.warning("No red highlighted plot found")
+                return
+            
+            plot_contour = max(contours, key=cv2.contourArea)
+            px, py, pw, ph = cv2.boundingRect(plot_contour)
+            
+            gray = cv2.cvtColor(page3_img, cv2.COLOR_RGB2GRAY)
+            
+            # Helper: Check if region contains "ممر" (corridor) text
+            def has_corridor_text(region):
+                """Check if region contains 'ممر' (corridor) - if yes, it's NOT a street"""
+                if region.size == 0:
+                    return False
+                
+                try:
+                    import pytesseract
+                    # OCR with Arabic language
+                    text = pytesseract.image_to_string(region, lang='ara', config='--psm 6')
+                    # Check for corridor text
+                    if 'ممر' in text or 'مرر' in text or 'ممر' in text:
+                        return True
+                except Exception as e:
+                    logger.debug(f"OCR check failed: {e}")
+                    pass
+                
+                return False
+            
+            # Helper: Detect street grid pattern (excluding corridors)
+            def has_street_grid(region):
+                """Detect real street grid pattern, excluding corridors (ممر)"""
+                if region.size == 0 or region.shape[0] < 20 or region.shape[1] < 20:
+                    return False
+                
+                # First check if it's a corridor, not a street
+                if has_corridor_text(region):
+                    logger.debug("Detected corridor (ممر), not counting as street")
+                    return False
+                
+                mean_intensity = np.mean(region)
+                if mean_intensity < 180:
+                    return False
+                
+                edges = cv2.Canny(region, 50, 150, apertureSize=3)
+                lines = cv2.HoughLinesP(edges, 1, np.pi/180, threshold=20, minLineLength=12, maxLineGap=6)
+                
+                if lines is None or len(lines) < 4:
+                    return False
+                
+                h_lines, v_lines = 0, 0
+                for line in lines:
+                    x1, y1, x2, y2 = line[0]
+                    angle = np.abs(np.arctan2(y2 - y1, x2 - x1) * 180 / np.pi)
+                    if angle < 20 or angle > 160:
+                        h_lines += 1
+                    elif 70 < angle < 110:
+                        v_lines += 1
+                
+                return h_lines >= 2 and v_lines >= 2
+            
+            # Check for streets on each side
+            margin = int(min(pw, ph) * 0.3)
+            streets_found = []
+            
+            # Top
+            region = gray[max(0, py-margin):py, px:px+pw]
+            if has_street_grid(region):
+                streets_found.append('top')
+            
+            # Bottom
+            region = gray[py+ph:min(height, py+ph+margin), px:px+pw]
+            if has_street_grid(region):
+                streets_found.append('bottom')
+            
+            # Left
+            region = gray[py:py+ph, max(0, px-margin):px]
+            if has_street_grid(region):
+                streets_found.append('left')
+            
+            # Right
+            region = gray[py:py+ph, px+pw:min(width, px+pw+margin)]
+            if has_street_grid(region):
+                streets_found.append('right')
+            
+            # Count streets
+            street_count = len(streets_found)
+            self.data.connected_streets = max(1, min(street_count, 2))
+            
+            # Detect corner: Plot is at the END of a street
+            # Corner plot has street/park on one side, NOT continuing villa plots
+            # Check if there are villa plots beyond this plot (indicating middle of row)
+            
+            is_corner = False
+            
+            # Get current plot number to check for adjacent plots
+            current_plot_num = self.data.plot_number
+            
+            # Expand search area to look for other villa plots beyond the current plot
+            search_margin = int(min(pw, ph) * 0.6)  # Look 60% of plot size beyond
+            
+            def has_adjacent_plot_number(region, expected_plot_nums):
+                """Check if region contains adjacent plot numbers (current_plot ± 1)"""
+                logger.info(f"  Checking for plot numbers: {expected_plot_nums}")
+                
+                if region.size == 0 or region.shape[0] < 30 or region.shape[1] < 30:
+                    logger.info(f"  -> Region too small, skipping")
+                    return False
+                
+                # First check if it's a corridor (not a street)
+                try:
+                    if has_corridor_text(region):
+                        logger.info(f"  -> Detected corridor (ممر), not a street")
+                        return False
+                except Exception as e:
+                    pass  # OCR might not be available
+                
+                # Try PaddleOCR first (better accuracy for documents)
+                if PADDLE_OCR_AVAILABLE:
+                    try:
+                        # Lazy init PaddleOCR on first use
+                        global paddle_ocr
+                        if paddle_ocr is None:
+                            from paddleocr import PaddleOCR
+                            paddle_ocr = PaddleOCR(use_angle_cls=True, lang='en', use_gpu=False, show_log=False)
+                        
+                        result = paddle_ocr.ocr(region, cls=True)
+                        found_numbers = []
+                        
+                        if result and result[0]:
+                            for line in result[0]:
+                                text = line[1][0]  # Extract text
+                                # Extract numbers from detected text
+                                import re
+                                numbers = re.findall(r'\b\d{2,4}\b', text)
+                                found_numbers.extend([int(n) for n in numbers])
+                        
+                        logger.info(f"  PaddleOCR found numbers: {found_numbers}")
+                        
+                        # Check if expected plot number is found
+                        for num in found_numbers:
+                            if num in expected_plot_nums:
+                                logger.info(f"  -> Found adjacent plot {num} via PaddleOCR")
+                                return True
+                    except Exception as e:
+                        logger.info(f"  PaddleOCR error: {e}")
+                
+                # Fallback to Tesseract OCR
+                try:
+                    import pytesseract
+                    import re
+                    
+                    text = pytesseract.image_to_string(region, config='--psm 11')
+                    text = text.strip()
+                    
+                    # Extract all numbers from text
+                    numbers = re.findall(r'\b\d{2,4}\b', text)
+                    found_numbers = [int(n) for n in numbers]
+                    
+                    logger.info(f"  Tesseract found numbers: {found_numbers}")
+                    
+                    # Check if any expected plot number is found
+                    for num in found_numbers:
+                        if num in expected_plot_nums:
+                            logger.info(f"  -> Found adjacent plot {num} via Tesseract")
+                            return True
+                    
+                    # OCR didn't find the expected plot number
+                    # Fall through to visual detection as backup
+                    
+                except Exception as e:
+                    logger.info(f"  Tesseract error: {e}, falling back to visual detection")
+                    
+                    # Fallback: Distinguish villa plots from parks
+                    # Villa plots: have filled areas WITH text/numbers (plot labels)
+                    # Parks: have grid patterns but NO text/numbers
+                    
+                    # Check for text-like regions (small dark spots = text characters)
+                    # Villa plots have plot numbers and unit types written inside
+                    _, text_binary = cv2.threshold(region, 200, 255, cv2.THRESH_BINARY_INV)
+                    
+                    # Find small components (likely text characters)
+                    contours, _ = cv2.findContours(text_binary, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+                    small_components = [cv2.contourArea(c) for c in contours if 10 < cv2.contourArea(c) < 500]
+                    
+                    # Villa plots have multiple small dark regions (text characters)
+                    # Parks have few or no small components (just grid lines)
+                    has_text = len(small_components) > 5
+                    
+                    # Also check for larger filled areas (plot interiors)
+                    _, binary = cv2.threshold(region, 230, 255, cv2.THRESH_BINARY_INV)
+                    num_labels, labels, stats, centroids = cv2.connectedComponentsWithStats(binary, connectivity=8)
+                    
+                    # Look for compact filled areas
+                    villa_components = 0
+                    for i in range(1, num_labels):
+                        area = stats[i, cv2.CC_STAT_AREA]
+                        width = stats[i, cv2.CC_STAT_WIDTH]
+                        height = stats[i, cv2.CC_STAT_HEIGHT]
+                        
+                        aspect_ratio = width / max(height, 1)
+                        if aspect_ratio < 1:
+                            aspect_ratio = 1 / aspect_ratio
+                        
+                        bbox_area = width * height
+                        fill_ratio = area / max(bbox_area, 1)
+                        
+                        # Villa plot: medium size, compact, reasonable aspect ratio
+                        if 3000 < area < 15000 and aspect_ratio < 2.5 and fill_ratio > 0.5:
+                            villa_components += 1
+                            logger.info(f"  -> Villa component: area={area}, size={width}x{height}, fill={fill_ratio:.2f}")
+                    
+                    # Villa plot criteria: 
+                    # - Has many text-like regions (>8 chars) indicating plot labels
+                    # - OR has compact filled plot interior
+                    if (has_text and len(small_components) > 8) or villa_components > 0:
+                        logger.info(f"  -> Found adjacent plot via visual (text={len(small_components)}, fills={villa_components})")
+                        return True
+                    else:
+                        logger.info(f"  -> No adjacent plot found (text={len(small_components)}, fills={villa_components})")
+                        return False
+            
+            # Check left and right for adjacent plots
+            # For plot N, look for plots N-1 and N+1
+            # Check multiple regions to handle trapezoid/angled plots
+            try:
+                plot_num = int(current_plot_num)
+                
+                # For trapezoid/angled plots, check both straight and diagonal regions
+                # Left side: check three regions (top-left, middle-left, bottom-left)
+                search_height = int(ph * 0.4)  # 40% of plot height per region
+                
+                # Left regions (looking for plot N-1)
+                left_regions = [
+                    # Top-left diagonal
+                    gray[max(0, py-search_height):py+search_height, max(0, px-search_margin):px],
+                    # Middle-left horizontal  
+                    gray[py+int(ph*0.3):py+int(ph*0.7), max(0, px-search_margin):px],
+                    # Bottom-left diagonal
+                    gray[py+ph-search_height:min(height, py+ph+search_height), max(0, px-search_margin):px]
+                ]
+                
+                # Right regions (looking for plot N+1)
+                right_regions = [
+                    # Top-right diagonal
+                    gray[max(0, py-search_height):py+search_height, px+pw:min(width, px+pw+search_margin)],
+                    # Middle-right horizontal
+                    gray[py+int(ph*0.3):py+int(ph*0.7), px+pw:min(width, px+pw+search_margin)],
+                    # Bottom-right diagonal
+                    gray[py+ph-search_height:min(height, py+ph+search_height), px+pw:min(width, px+pw+search_margin)]
+                ]
+                
+                # Check if ANY left region contains the adjacent plot
+                has_left_villa = False
+                for i, region in enumerate(left_regions):
+                    if has_adjacent_plot_number(region, [plot_num - 1]):
+                        has_left_villa = True
+                        logger.info(f"  Found left villa (region {i})")
+                        break
+                
+                # Check if ANY right region contains the adjacent plot
+                has_right_villa = False
+                for i, region in enumerate(right_regions):
+                    if has_adjacent_plot_number(region, [plot_num + 1]):
+                        has_right_villa = True
+                        logger.info(f"  Found right villa (region {i})")
+                        break
+                
+                # Corner plot logic:
+                # - Corner = Street ends at this plot (no more villas in that direction)
+                # - If BOTH left and right have adjacent villas, it's in the MIDDLE of a row (NOT corner)
+                # - If ONE or BOTH sides have no adjacent villas, check if there's a street/open space
+                
+                # For now: If BOTH sides have villas, definitely NOT a corner
+                if has_left_villa and has_right_villa:
+                    is_corner = False
+                # If BOTH sides have no villas, likely a corner (end of street)
+                elif not has_left_villa and not has_right_villa:
+                    is_corner = True
+                # If only ONE side has villa, it's likely a corner
+                else:
+                    is_corner = True
+                
+                self.data.corner_unit = "Yes" if is_corner else "No"
+                
+                logger.info(f"Streets detected: {streets_found}, count={self.data.connected_streets}")
+                logger.info(f"Adjacent plots - left ({plot_num-1}): {has_left_villa}, right ({plot_num+1}): {has_right_villa}, corner={self.data.corner_unit}")
+                
+            except (ValueError, TypeError) as e:
+                logger.warning(f"Could not parse plot number '{current_plot_num}': {e}")
+                self.data.corner_unit = "No"
+            
+        except Exception as e:
+            logger.error(f"Corner/street detection failed: {e}")
+            logger.info("Using defaults: corner=No, streets=1")
+
+
     def _extract_facade_style(self):
-        """Detect facade style using Claude Vision as primary method.
+        """Detect facade style using DINO + SVM classifier (preferred) or CLIP fallback.
 
-        Traditional (T): Has half-circle/arch above door (like attached image shows)
+        Traditional (T): Has half-circle/arch above door
         Modern (M): All doors have flat/rectangular tops, no arches
-
-        NOTE: Edge detection was removed because it produced false positives.
-        The arch detection algorithm was incorrectly finding circles/ellipses in
-        architectural drawings that weren't actual door arches.
         """
         logger.info("Extracting facade style...")
 
-        # Skip AI vision if disabled
-        if self.vision_model is None:
-            logger.info("AI vision disabled - skipping facade detection")
-            self.data.facade_type = "M"  # Default to Modern
-            return
-
-        # Known facade types by unit type (from ROSHN specifications)
-        # STEP 1: Use Claude Vision (primary, most reliable for this task)
-        logger.info("Step 1: Using Claude Vision for facade detection...")
-        try:
-            result = self._extract_facade_with_multiple_pages()
-            if result and 'facade_type' in result:
-                facade = result['facade_type']
-                # Validate result
-                if facade in ['T', 'M']:
-                    self.data.facade_type = facade
-                    logger.info(f"Facade type from Claude Vision: {self.data.facade_type}")
-                    return
-        except Exception as e:
-            logger.error(f"Claude Vision facade extraction failed: {e}")
-        
-        # STEP 2: Try Gemini Vision as fallback
-        logger.info("Step 2: Trying Gemini Vision for facade detection...")
-        for page_num in [7, 8]:
-            if page_num >= len(self.images):
-                continue
-            
+        # Priority 1: Use DINO + SVM classifier (best performance)
+        if self.dino_classifier:
+            logger.info("Using DINO + SVM classifier for facade detection...")
             try:
-                page_img = self.images[page_num]
-                result = self._extract_with_gemini_vision(page_img, "facade")
+                # Try multiple pages to find facade - PRIORITIZE PAGE 8 (elevation view with arches)
+                # Page 8 (index 7) has the actual facade elevation drawings
+                # Page 3 (index 2) has area tables and may not show arches clearly
+                best_prediction = None
+                best_confidence = 0.0
+                best_page = None
                 
-                if result and 'facade_type' in result:
-                    facade = result['facade_type']
-                    if facade in ['T', 'M']:
-                        self.data.facade_type = facade
-                        logger.info(f"Facade type from Gemini Vision (page {page_num+1}): {self.data.facade_type}")
-                        return
-                    
+                for page_num in [7, 8, 2]:  # Pages 8, 9, 3 - REORDERED: page 8 first!
+                    if page_num < len(self.images):
+                        temp_facade_path = os.path.join(self.debug_subdir, f"temp_facade_p{page_num+1}.jpg")
+                        self.images[page_num].save(temp_facade_path)
+
+                        # Classify with DINO + SVM
+                        facade_type, confidence = self.dino_classifier.predict(temp_facade_path)
+                        
+                        logger.info(f"Page {page_num+1}: {facade_type} (confidence: {confidence:.2%})")
+
+                        # Track best prediction
+                        if confidence > best_confidence:
+                            best_confidence = confidence
+                            best_prediction = facade_type
+                            best_page = page_num
+                        
+                        # For page 8 (elevation view), use lower threshold since it's the most accurate
+                        threshold = 0.60 if page_num == 7 else 0.85  # Page 8 = 60%, others = 85%
+                        
+                        if confidence >= threshold:
+                            facade_map = {'traditional': 'T', 'modern': 'M'}
+                            self.data.facade_type = facade_map[facade_type]
+                            logger.info(f"✓ Facade type from DINO + SVM (page {page_num+1}): {self.data.facade_type} "
+                                      f"(confidence: {confidence:.2%})")
+                            
+                            # Save facade image for validation
+                            final_facade_path = os.path.join(self.debug_subdir, f"facade_{facade_type}_p{page_num+1}.jpg")
+                            self.images[page_num].save(final_facade_path)
+                            return
+                
+                # If no page met threshold, use best prediction found
+                if best_prediction:
+                    facade_map = {'traditional': 'T', 'modern': 'M'}
+                    self.data.facade_type = facade_map[best_prediction]
+                    logger.info(f"✓ Facade type from DINO + SVM (best: page {best_page+1}): {self.data.facade_type} "
+                              f"(confidence: {best_confidence:.2%})")
+                    final_facade_path = os.path.join(self.debug_subdir, f"facade_{best_prediction}_p{best_page+1}.jpg")
+                    self.images[best_page].save(final_facade_path)
+                    return
+
             except Exception as e:
-                logger.error(f"Gemini Vision facade extraction failed for page {page_num+1}: {e}")
-                continue
+                logger.error(f"DINO + SVM classifier failed: {e}")
+                logger.info("Falling back to CLIP classifier...")
+
+        # Priority 2: Use CLIP-based classifier for facade detection
+        if self.auto_classifier and self.auto_classifier.is_trained():
+            logger.info("Using CLIP classifier for facade detection...")
+            try:
+                # Save facade image temporarily for classification
+                temp_facade_path = None
+                for page_num in [2, 7, 8]:  # Try pages 3, 8, 9
+                    if page_num < len(self.images):
+                        temp_facade_path = os.path.join(self.debug_subdir, f"temp_facade_p{page_num+1}.jpg")
+                        self.images[page_num].save(temp_facade_path)
+
+                        # Classify
+                        result = self.auto_classifier.classify(
+                            temp_facade_path,
+                            features=['facade_type']
+                        )
+
+                        if result and 'facade_type' in result:
+                            facade_cat = result['facade_type']['category']
+                            confidence = result['facade_type']['confidence']
+
+                            # Map category to T/M
+                            facade_map = {'traditional': 'T', 'modern': 'M'}
+                            if facade_cat in facade_map:
+                                self.data.facade_type = facade_map[facade_cat]
+                                logger.info(f"Facade type from CLIP classifier: {self.data.facade_type} "
+                                          f"(confidence: {confidence:.2%})")
+
+                                # Use classifier result if confidence is high enough
+                                if confidence >= 0.70:  # 70% confidence threshold
+                                    return
+
+            except Exception as e:
+                logger.error(f"CLIP classifier failed: {e}")
+        else:
+            logger.warning("No automatic classifier available")
         
-        # Final fallback: Default to Modern (M) since Traditional requires clear arch
-        # If no arch is clearly detected by Vision APIs, assume Modern
+        # Fallback: Default to Modern (M)
         self.data.facade_type = "M"
-        logger.info(f"Facade type defaulted to M (Modern) - no clear arch detected")
+        logger.info(f"Facade type defaulted to M (Modern) - classifier unavailable or uncertain")
     
     def _count_vertical_lines(self, img: np.ndarray, page_num: int) -> int:
         """Count vertical lines in facade image"""

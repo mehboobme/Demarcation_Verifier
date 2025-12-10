@@ -48,3 +48,8 @@ debug_images/
 
 # Poppler binaries (large files)
 poppler.zip
+
+# CLIP Classifier (optional - uncomment to exclude from git)
+# models/
+# reference_images/
+# *.pkl

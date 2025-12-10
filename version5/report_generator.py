@@ -157,9 +157,10 @@ class ReportGenerator:
         # Define page groups for organization
         page_groups = {
             "Page 1": ["page1_unit_code"],
-            "Page 2 Section 1": ["page2_sec1_nbhd_name"],
+            "Page 2 Section 1": ["page2_sec1_nbhd_name", "page2_sec1_unit_type"],
             "Page 2 Section 2": ["page2_sec2_nbhd_name", "page2_sec2_unit_type", "page2_sec2_amana_plot_no"],
-            "Page 3 (Dimensions)": ["page3_land_width", "page3_land_length"],
+            "Page 3 Header": ["page3_header_unit_type"],
+            "Page 3 (Dimensions)": ["page3_land_width", "page3_land_length", "page3_street_width"],
             "Page 3 Footer (Areas)": ["page3_footer_land_area", "page3_footer_gfa", "page3_footer_first_floor_area", 
                                        "page3_footer_ground_floor_area", "page3_footer_ground_floor_annex", 
                                        "page3_footer_second_floor_area"],
@@ -170,10 +171,12 @@ class ReportGenerator:
             "Page 8 Section 1 (Front)": ["page8_sec1_unit_type"],
             "Page 8 Section 2 (Back)": ["page8_sec2_unit_type"],
             "Page 9 Header (Side)": ["page9_header_unit_type"],
+            "Typology Verification": ["typology_page4_ground", "typology_page5_first", "typology_page6_top", 
+                                      "typology_page7_terrace", "typology_page8_front", "typology_page9_back"],
             "Consolidated": ["unit_code", "plot_number", "unit_type", "land_area", "ground_floor_area", 
                             "first_floor_area", "upper_floor_area", "total_floor_area", "ground_floor_annex",
                             "land_length", "land_width", "street_width", "facade_type",
-                            "red_highlight_neighborhood", "red_highlight_plot"]
+                            "red_highlight_neighborhood", "red_highlight_plot", "corner_unit", "connected_streets"]
         }
         
         # Headers
@@ -189,11 +192,14 @@ class ReportGenerator:
         field_mapping = {
             "page1_unit_code": ("رقم الوحدة السكنية", "Unit_Code"),
             "page2_sec1_nbhd_name": ("المنطقة", "NBHD_Name"),
+            "page2_sec1_unit_type": ("الخريطة المرجعية", "Unit_Type"),
             "page2_sec2_nbhd_name": ("المنطقة", "NBHD_Name"),
             "page2_sec2_unit_type": ("الخريطة المرجعية", "Unit_Type"),
             "page2_sec2_amana_plot_no": ("القطعة رقم", "AMANA_Plot_No"),
+            "page3_header_unit_type": ("الموقع العام", "Unit_Type"),
             "page3_land_width": ("plot width", "Land_Width"),
             "page3_land_length": ("plot length", "Land_Length"),
+            "page3_street_width": ("عرض الشارع", "Street_Width"),
             "page3_footer_land_area": ("مساحة الأرض", "Land_Area"),
             "page3_footer_gfa": ("إجمالي مساحة الطوابق", "GFA"),
             "page3_footer_first_floor_area": ("مساحة الطابق الأول", "First_Floor_Area"),
@@ -225,6 +231,14 @@ class ReportGenerator:
             "facade_type": ("Facade Type", "Façade_Type"),
             "red_highlight_neighborhood": ("Red Highlight (Neighborhood)", "Visual Check"),
             "red_highlight_plot": ("Red Highlight (Plot)", "Visual Check"),
+            "corner_unit": ("Corner Unit", "Corner_Unit"),
+            "connected_streets": ("Number of Streets", "Number_Of_Streets"),
+            "typology_page4_ground": ("Ground Floor Plan Match", "Unit_Type"),
+            "typology_page5_first": ("First Floor Plan Match", "Unit_Type"),
+            "typology_page6_top": ("Top Floor Plan Match", "Unit_Type"),
+            "typology_page7_terrace": ("Terrace Plan Match", "Unit_Type"),
+            "typology_page8_front": ("Front Facade Match", "Unit_Type"),
+            "typology_page9_back": ("Back Facade Match", "Unit_Type"),
         }
         
         row = 2

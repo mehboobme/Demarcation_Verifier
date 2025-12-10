@@ -63,8 +63,13 @@ class ValidationReport:
 class Validator:
     """Validates PDF data against ground truth"""
     
-    def __init__(self, tolerance: float = 0.01):
+    def __init__(self, tolerance: float = 0.01, use_gpu: bool = False):
         self.tolerance = tolerance
+        self.use_gpu = use_gpu
+        self.unit_verifier = None
+        logger.info(f"Validator initialized with use_gpu={use_gpu}")
+        if use_gpu:
+            logger.info("✓ GPU typology verifier will be loaded on first validation (adds 6 checks: 4 floor plans + 2 facades)")
     
     def validate(self, pdf_data: ExtractedData, ground_truth: GroundTruthRecord) -> ValidationReport:
         """Main validation method"""
@@ -81,8 +86,9 @@ class Validator:
             # ============ PAGE 1: Unit Code ============
             ("page1_unit_code", pdf_data.page1_unit_code, ground_truth.unit_code, 1),
             
-            # ============ PAGE 2 Section 1: NBHD_Name, AMANA_Plot_No ============
+            # ============ PAGE 2 Section 1: NBHD_Name, Unit_Type, AMANA_Plot_No ============
             ("page2_sec1_nbhd_name", pdf_data.page2_sec1_nbhd_name, ground_truth.nbhd_name, 2),
+            ("page2_sec1_unit_type", pdf_data.page2_sec1_unit_type, ground_truth.unit_type, 2),
             
             # ============ PAGE 2 Section 2: NBHD_Name, Unit_Type, AMANA_Plot_No (RED plot) ============
             ("page2_sec2_nbhd_name", pdf_data.page2_sec2_nbhd_name, ground_truth.nbhd_name, 2),
@@ -92,6 +98,10 @@ class Validator:
             # ============ PAGE 3: Dimensions (plot width, plot length) ============
             ("page3_land_width", pdf_data.page3_land_width, ground_truth.land_width, 2),
             ("page3_land_length", pdf_data.page3_land_length, ground_truth.land_length, 2),
+            ("page3_street_width", pdf_data.page3_street_width, ground_truth.street_width, 2),
+            
+            # ============ PAGE 3 Header: Unit_Type ============
+            ("page3_header_unit_type", pdf_data.page3_header_unit_type, ground_truth.unit_type, 2),
             
             # ============ PAGE 3 Footer: Areas table ============
             ("page3_footer_land_area", pdf_data.page3_footer_land_area, ground_truth.land_area, 2),
@@ -169,6 +179,15 @@ class Validator:
         
         # Additional checks for header consistency
         self._validate_headers(pdf_data, ground_truth, report)
+        
+        # Unit type verification (typology - floor plans and facades)
+        if self.use_gpu:
+            logger.info("=" * 60)
+            logger.info("GPU TYPOLOGY VERIFICATION ENABLED - Running 6 additional checks")
+            logger.info("=" * 60)
+            self._verify_unit_type_gpu(pdf_data, ground_truth, report)
+        else:
+            logger.info("GPU typology verification disabled (use --gpu flag to enable)")
         
         # Determine overall status
         report.overall_status = self._determine_overall_status(report)
@@ -278,6 +297,188 @@ class Validator:
                 report.all_results.append(result)
                 report.warnings += 1
                 report.total_checks += 1
+    
+    def _get_unit_verifier(self):
+        """Lazy load unit type verifier (GPU or pHash)"""
+        if self.unit_verifier is None:
+            try:
+                if self.use_gpu:
+                    from unit_type_verifier_gpu import GPUUnitTypeVerifier
+                    logger.info("Loading GPU Unit Type Verifier (ORB + pHash + blue boundary)...")
+                    self.unit_verifier = GPUUnitTypeVerifier(use_gpu=True)
+                    logger.info("[OK] GPU verifier ready - typology checks enabled (6 additional checks)")
+                else:
+                    from unit_type_verifier_phash import HybridUnitTypeVerifier
+                    logger.info("Loading pHash Unit Type Verifier...")
+                    self.unit_verifier = HybridUnitTypeVerifier()
+                    logger.info("[OK] pHash verifier ready")
+            except Exception as e:
+                logger.error(f"⚠️ Failed to load unit verifier: {e}")
+                import traceback
+                logger.error(traceback.format_exc())
+                self.unit_verifier = False
+        return self.unit_verifier if self.unit_verifier is not False else None
+    
+    def _verify_unit_type_gpu(self, pdf_data: ExtractedData, ground_truth: GroundTruthRecord, report: ValidationReport):
+        """Verify unit type using GPU verifier with floor plans and facades"""
+        verifier = self._get_unit_verifier()
+        if not verifier:
+            logger.warning("GPU verifier not available, skipping typology verification")
+            return
+        
+        try:
+            # Prepare images
+            facade_images = {
+                'front': pdf_data.facade_front_image,
+                'back': pdf_data.facade_back_image
+            }
+            
+            floor_images = {
+                'ground': pdf_data.ground_floor_image,
+                'first': pdf_data.first_floor_image,
+                'top': pdf_data.top_floor_image,
+                'terrace': pdf_data.terrace_image
+            }
+            
+            # Run verification
+            logger.info("Running GPU-accelerated typology verification...")
+            result = verifier.verify_unit_type_multi(facade_images, floor_images, ground_truth.unit_type)
+            
+            # Process page-by-page floor plan results
+            floor_ver = result.get('floor_plan_verification', {})
+            floor_details = floor_ver.get('details', {})
+            
+            # Page 4 - Ground Floor
+            if 'ground' in floor_details:
+                detail = floor_details['ground']
+                mirror_note = " (mirror image)" if detail.get('mirrored') else ""
+                page_result = ValidationResult(
+                    field_name="typology_page4_ground",
+                    pdf_value=detail.get('detected', 'Unknown'),
+                    ground_truth_value=ground_truth.unit_type,
+                    status=ValidationStatus.MATCH if detail.get('detected') == ground_truth.unit_type else ValidationStatus.MISMATCH,
+                    severity=SEVERITY["MEDIUM"],
+                    message=f"Ground Floor Plan: {detail.get('similarity', 0):.1%} similarity{mirror_note}",
+                    page_number=4
+                )
+                report.all_results.append(page_result)
+                report.total_checks += 1
+                if page_result.status == ValidationStatus.MATCH:
+                    report.matches += 1
+                else:
+                    report.mismatches += 1
+                    self._add_to_failure_list(report, page_result)
+            
+            # Page 5 - First Floor
+            if 'first' in floor_details:
+                detail = floor_details['first']
+                mirror_note = " (mirror image)" if detail.get('mirrored') else ""
+                page_result = ValidationResult(
+                    field_name="typology_page5_first",
+                    pdf_value=detail.get('detected', 'Unknown'),
+                    ground_truth_value=ground_truth.unit_type,
+                    status=ValidationStatus.MATCH if detail.get('detected') == ground_truth.unit_type else ValidationStatus.MISMATCH,
+                    severity=SEVERITY["MEDIUM"],
+                    message=f"First Floor Plan: {detail.get('similarity', 0):.1%} similarity{mirror_note}",
+                    page_number=5
+                )
+                report.all_results.append(page_result)
+                report.total_checks += 1
+                if page_result.status == ValidationStatus.MATCH:
+                    report.matches += 1
+                else:
+                    report.mismatches += 1
+                    self._add_to_failure_list(report, page_result)
+            
+            # Page 6 - Top Floor
+            if 'top' in floor_details:
+                detail = floor_details['top']
+                mirror_note = " (mirror image)" if detail.get('mirrored') else ""
+                page_result = ValidationResult(
+                    field_name="typology_page6_top",
+                    pdf_value=detail.get('detected', 'Unknown'),
+                    ground_truth_value=ground_truth.unit_type,
+                    status=ValidationStatus.MATCH if detail.get('detected') == ground_truth.unit_type else ValidationStatus.MISMATCH,
+                    severity=SEVERITY["MEDIUM"],
+                    message=f"Top Floor Plan: {detail.get('similarity', 0):.1%} similarity{mirror_note}",
+                    page_number=6
+                )
+                report.all_results.append(page_result)
+                report.total_checks += 1
+                if page_result.status == ValidationStatus.MATCH:
+                    report.matches += 1
+                else:
+                    report.mismatches += 1
+                    self._add_to_failure_list(report, page_result)
+            
+            # Page 7 - Terrace
+            if 'terrace' in floor_details:
+                detail = floor_details['terrace']
+                page_result = ValidationResult(
+                    field_name="typology_page7_terrace",
+                    pdf_value=detail.get('detected', 'Unknown'),
+                    ground_truth_value=ground_truth.unit_type,
+                    status=ValidationStatus.MATCH if detail.get('detected') == ground_truth.unit_type else ValidationStatus.MISMATCH,
+                    severity=SEVERITY["MEDIUM"],
+                    message=f"Terrace Plan: {detail.get('similarity', 0):.1%} similarity",
+                    page_number=7
+                )
+                report.all_results.append(page_result)
+                report.total_checks += 1
+                if page_result.status == ValidationStatus.MATCH:
+                    report.matches += 1
+                else:
+                    report.mismatches += 1
+                    self._add_to_failure_list(report, page_result)
+            
+            # Process page-by-page facade results
+            facade_ver = result.get('facade_verification', {})
+            facade_details = facade_ver.get('details', {})
+            
+            # Page 8 - Front Facade
+            if 'front' in facade_details:
+                detail = facade_details['front']
+                page_result = ValidationResult(
+                    field_name="typology_page8_front",
+                    pdf_value=detail.get('detected', 'Unknown'),
+                    ground_truth_value=ground_truth.unit_type,
+                    status=ValidationStatus.MATCH if detail.get('detected') == ground_truth.unit_type else ValidationStatus.MISMATCH,
+                    severity=SEVERITY["MEDIUM"],
+                    message=f"Front Facade: {detail.get('similarity', 0):.1%} similarity",
+                    page_number=8
+                )
+                report.all_results.append(page_result)
+                report.total_checks += 1
+                if page_result.status == ValidationStatus.MATCH:
+                    report.matches += 1
+                else:
+                    report.mismatches += 1
+                    self._add_to_failure_list(report, page_result)
+            
+            # Page 9 - Back Facade
+            if 'back' in facade_details:
+                detail = facade_details['back']
+                page_result = ValidationResult(
+                    field_name="typology_page9_back",
+                    pdf_value=detail.get('detected', 'Unknown'),
+                    ground_truth_value=ground_truth.unit_type,
+                    status=ValidationStatus.MATCH if detail.get('detected') == ground_truth.unit_type else ValidationStatus.MISMATCH,
+                    severity=SEVERITY["MEDIUM"],
+                    message=f"Back Facade: {detail.get('similarity', 0):.1%} similarity",
+                    page_number=9
+                )
+                report.all_results.append(page_result)
+                report.total_checks += 1
+                if page_result.status == ValidationStatus.MATCH:
+                    report.matches += 1
+                else:
+                    report.mismatches += 1
+                    self._add_to_failure_list(report, page_result)
+            
+            logger.info(f"GPU verification complete: Floor={floor_ver.get('detected')}, Facade={facade_ver.get('detected')}")
+            
+        except Exception as e:
+            logger.error(f"GPU typology verification failed: {e}", exc_info=True)
     
     def _determine_overall_status(self, report: ValidationReport) -> str:
         """Determine overall validation status"""
